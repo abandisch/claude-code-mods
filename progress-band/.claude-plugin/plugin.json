@@ -1,6 +1,6 @@
 {
   "name": "progress-band",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Live progress panel above the prompt: Claude's task list as steps, subagents as a roster with an Agents pane, tool rows condensed to one line, and a collapse to one row when idle.",
   "types": "./types/index.d.ts"
 }

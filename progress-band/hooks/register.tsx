@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { AgentInfo, EngineInterface, Register } from 'claude-code'
+import type { AgentInfo, EngineInterface, Register, TurnUsage } from 'claude-code'
 
 import type { AgentRow, AgentState, Step, View } from '../types'
 
@@ -449,18 +449,22 @@ export const register: Register = on => {
         const usage = e.usage
         const lastText = firstLine(e.answer)
         const list = await update($, agents, cur =>
-          cur.map(a =>
-            a.id === id
-              ? {
-                  ...a,
-                  status: stateOfReason(e.reason),
-                  endedAt: now,
-                  tokens: (a.tokens ?? 0) + (usage ? usage.input_tokens + usage.output_tokens : 0),
-                  modelId: usage?.model ?? a.modelId,
-                  lastText: lastText ?? a.lastText,
-                }
-              : a,
-          ),
+          cur.map(a => {
+            if (a.id !== id) return a
+            // The steps of this turn already added their share as they landed.
+            const counted = a.turnId === e.turnId ? (a.turnTokens ?? 0) : 0
+            const total = usage ? usage.input_tokens + usage.output_tokens : 0
+            return {
+              ...a,
+              status: stateOfReason(e.reason),
+              endedAt: now,
+              tokens: (a.tokens ?? 0) + Math.max(0, total - counted),
+              turnId: undefined,
+              turnTokens: undefined,
+              modelId: usage?.model ?? a.modelId,
+              lastText: lastText ?? a.lastText,
+            }
+          }),
         )
         if (e.reason === 'error') {
           const description = list.find(a => a.id === id)?.description ?? id
@@ -485,6 +489,16 @@ export const register: Register = on => {
     }
 
     return next(e)
+  })
+
+  // Each model request a subagent makes: add its cost to the row as it lands,
+  // so the band's token column moves while the agent runs, not just at its end.
+  on('turn.step', async function* ($, e, next) {
+    const response = yield* next(e)
+    if (e.agentId !== undefined && response.usage) {
+      void recordAgentStep($, e.agentId, e.turnId, response.usage).catch(() => {})
+    }
+    return response
   })
 
   on('agent.spawn', async ($, e, next) => {
@@ -1092,6 +1106,24 @@ async function recordAgentCall($: EngineInterface, id: string, activity: string)
           ...list,
           { id, description: id, type: 'agent', status: 'running', startedAt: now, calls: 1, tokens: 0, activity },
         ]),
+  )
+}
+
+/** One model request of a subagent's turn: its tokens land on the row now. */
+async function recordAgentStep($: EngineInterface, id: string, turnId: string, usage: TurnUsage) {
+  const added = usage.input_tokens + usage.output_tokens
+  await update($, agents, list =>
+    list.map(a => {
+      if (a.id !== id) return a
+      const sameTurn = a.turnId === turnId
+      return {
+        ...a,
+        tokens: (a.tokens ?? 0) + added,
+        turnId,
+        turnTokens: (sameTurn ? (a.turnTokens ?? 0) : 0) + added,
+        modelId: usage.model || a.modelId,
+      }
+    }),
   )
 }
 

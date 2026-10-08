@@ -25,8 +25,8 @@ panel above the prompt.
   led by a dim role (`scout`, `implementer`, `reviewer`, `fixer`, `scribe`,
   read from the description, else the type and model tier), type and model
   tier (`general/opus`), status, elapsed time, tokens (`4.2k tok`: uncached
-  input plus output, added when each of the agent's turns ends, so a running
-  agent shows `0 tok` until then), tool-call count. Live agents first,
+  input plus output, added as each of the agent's model requests lands, so
+  the figure climbs while it runs), tool-call count. Live agents first,
   clustered by role, finished ones dimmed below. Up to 12 rows; when the band
   is short of rows the last one reads `+N more · /progress agents`. Widths
   are the band's usable width (body columns minus 2): under 70 the

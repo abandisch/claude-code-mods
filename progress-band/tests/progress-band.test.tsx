@@ -343,6 +343,61 @@ test('the wave header counts finished scouts', async ($, on) => {
   await ui.unmount()
 })
 
+const stepped = (fields: { agentId: string; turnId?: string; index?: number }) => ({
+  turnId: 't1',
+  index: 0,
+  model: 'claude-opus-5-5',
+  messageCount: 3,
+  ...fields,
+})
+
+const stepResult = (fields: { turnId: string; index: number; tokens: number }) => ({
+  turnId: fields.turnId,
+  index: fields.index,
+  answer: '',
+  toolUses: [],
+  stopReason: 'tool_use' as const,
+  usage: {
+    input_tokens: fields.tokens,
+    output_tokens: 0,
+    cache_read_input_tokens: 0,
+    cache_creation_input_tokens: 0,
+    model: 'claude-opus-5-5',
+  },
+})
+
+test('a running agent shows tokens as each step lands', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  on('agent.spawn', () => ({ agentId: 'a1', model: 'claude-opus-5-5' }))
+  on('agent.list', () => ({ value: [] }))
+  on('turn.step', async function* (_$, e) {
+    return stepResult({ turnId: e.turnId, index: e.index, tokens: e.index === 0 ? 1500 : 2500 })
+  })
+  on('turn.complete', (_$, e) => ({ text: e.answer }))
+  await $.agent.spawn({ prompt: 'build', description: 'Build the export mock', subagentType: 'general-purpose' })
+
+  for (const index of [0, 1]) {
+    const stream = $.turn.step(stepped({ agentId: 'a1', index }))
+    for await (const _chunk of stream) {
+      // drain
+    }
+    await stream.result
+  }
+
+  let ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^4\.0k tok$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Working/ })).toBeDefined()
+  await ui.unmount()
+
+  // The turn's end reports the same requests summed: nothing is counted twice.
+  const usage = { input_tokens: 4000, output_tokens: 0, model: 'claude-opus-5-5' }
+  await $.turn.complete(ended({ answer: 'Built.', reason: 'answer', agentId: 'a1', usage }))
+  ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^4\.0k tok$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^5\.0k tok$/ })).toBeUndefined()
+  await ui.unmount()
+})
+
 test('the agents header totals the roster tokens', async ($, on) => {
   mock.clock(on, { now: 1_000_000 })
   const ids = ['a1', 'a2']

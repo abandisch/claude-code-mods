@@ -27,6 +27,10 @@ export type AgentRow = {
   missingSince?: number
   calls: number
   tokens: number
+  /** The turn whose steps are being counted into `tokens` as they land. */
+  turnId?: string
+  /** What that turn's steps have added so far; its end tops up the rest. */
+  turnTokens?: number
   modelId?: string
   activity?: string
   lastText?: string
