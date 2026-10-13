@@ -85,7 +85,7 @@ test("the mod's own steps tool plans and advances the list", async ($, on) => {
 
 const STEPS = 'mcp__progress-band__steps'
 
-const ended = (fields: { answer: string; reason: 'answer' | 'error'; agentId?: string; usage?: { input_tokens: number; output_tokens: number; model: string } }) => ({
+const ended = (fields: { answer: string; reason: 'answer' | 'error' | 'aborted'; agentId?: string; usage?: { input_tokens: number; output_tokens: number; model: string } }) => ({
   turnId: 't1',
   durationMs: 1000,
   isAborted: false,
@@ -138,11 +138,17 @@ test('an answer ending in a question needs the person', async ($, on) => {
   on('turn.complete', (_$, e) => ({ text: e.answer }))
   on('agent.list', () => ({ value: [] }))
   await $.tool.call({ tool: STEPS, plan: [{ title: 'Check the balance' }, { title: 'Upload the photo' }] })
+  await $.tool.call({ tool: STEPS, step: 1, status: 'in_progress' })
   await $.turn.complete(ended({ answer: 'Shall I proceed?\n\n🔊 Shall I proceed, sir?', reason: 'answer' }))
 
   const ui = await $.ui.mount({ ...BAND, surface: 'terminal', props: { ...BAND.props, isWorking: false } })
   expect(await ui.find({ type: 'Text', text: /Needs you/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /asked you something/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Ended/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /not marked/i })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: 'Working' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Next' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Step 1 of 2' })).toBeDefined()
   await ui.unmount()
 })
 
@@ -224,8 +230,152 @@ test('a live background agent keeps the band working after the turn ends', async
 
   await $.turn.complete(ended({ answer: 'Found it.', reason: 'answer', agentId: 'ag1' }))
   ui = await $.ui.mount(idle)
-  expect(await ui.find({ type: 'Text', text: /Needs you/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '◼ Ended' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Needs you/ })).toBeUndefined()
   await ui.unmount()
+})
+
+test('a statement answer with open steps reads as ended, not needs you', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  on('turn.complete', (_$, e) => ({ text: e.answer }))
+  on('model.classify', () => ({ value: 'statement' }))
+  on('agent.list', () => ({ value: [] }))
+  await $.tool.call({ tool: STEPS, plan: [{ title: 'Build' }, { title: 'Opus gate and fixes' }, { title: 'Chrome pass' }] })
+  await $.tool.call({ tool: STEPS, step: 1, status: 'completed' })
+  await $.tool.call({ tool: STEPS, step: 2, status: 'in_progress' })
+  await $.turn.complete(ended({ answer: 'All wrapped up.', reason: 'answer' }))
+  await clock.settle()
+
+  const ui = await $.ui.mount(idleBand())
+  expect(await ui.find({ type: 'Text', text: /◼ Ended/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /2 steps not marked done/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Needs you/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /steps left/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: '1 of 3 steps' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Step 2 of 3/ })).toBeUndefined()
+  expect(await ui.findAll({ type: 'Text', text: 'Not marked' })).toHaveLength(2)
+  expect(await ui.find({ type: 'Text', text: /Working/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('one open step after a statement reads in the singular', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  on('turn.complete', (_$, e) => ({ text: e.answer }))
+  on('model.classify', () => ({ value: 'statement' }))
+  on('agent.list', () => ({ value: [] }))
+  await $.tool.call({ tool: STEPS, plan: [{ title: 'Build' }, { title: 'Chrome pass' }] })
+  await $.tool.call({ tool: STEPS, step: 1, status: 'completed' })
+  await $.turn.complete(ended({ answer: 'All wrapped up.', reason: 'answer' }))
+  await clock.settle()
+
+  const ui = await $.ui.mount(idleBand())
+  expect(await ui.find({ type: 'Text', text: /Turn ended; 1 step not marked done/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('an interrupted turn with open steps reads as stopped, rows unchanged', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  on('turn.complete', (_$, e) => ({ text: e.answer }))
+  on('model.classify', () => ({ value: 'statement' }))
+  on('agent.list', () => ({ value: [] }))
+  await $.tool.call({ tool: STEPS, plan: [{ title: 'Build' }, { title: 'Chrome pass' }] })
+  await $.tool.call({ tool: STEPS, step: 1, status: 'in_progress' })
+  await $.turn.complete({ ...ended({ answer: '', reason: 'aborted' }), isAborted: true })
+  await clock.settle()
+
+  const ui = await $.ui.mount(idleBand())
+  expect(await ui.find({ type: 'Text', text: '⊘ Stopped' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Not marked' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: 'Working' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Step 1 of 2' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a long title at width 30 is cut once and the row word stays whole', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  on('turn.complete', (_$, e) => ({ text: e.answer }))
+  on('model.classify', () => ({ value: 'statement' }))
+  on('agent.list', () => ({ value: [] }))
+  await $.tool.call({ tool: STEPS, plan: [{ title: 'Reconcile the quarterly ledger entries' }] })
+  await $.turn.complete(ended({ answer: 'All wrapped up.', reason: 'answer' }))
+  await clock.settle()
+
+  const ui = await $.ui.mount(idleBand({ bodyColumns: 32 }))
+  const title = await ui.find({ type: 'Text', text: /^Recon/ })
+  expect(title?.text.match(/…/g)).toHaveLength(1)
+  expect((await ui.find({ type: 'Text', text: 'Not marked' }))?.text).toBe('Not marked')
+  await ui.unmount()
+})
+
+const REMINDER_FOOTER = `If this request continues that work, mark each step completed with the ${STEPS} tool as it finishes, and before your final answer mark every finished step completed; leave a step that is genuinely unfinished open and say so. If this is a new request, call it with plan to replace the list (an empty plan clears it).`
+
+test('a submitted prompt carries the open steps as hidden context', async ($, on) => {
+  const seen: (readonly string[] | undefined)[] = []
+  on('prompt.submit', (_$, e) => {
+    seen.push(e.context)
+    return { text: e.text, context: e.context }
+  })
+  await $.tool.call({ tool: STEPS, plan: [{ title: 'Check the balance' }, { title: 'Upload the photo' }, { title: 'Send the form' }] })
+  await $.tool.call({ tool: STEPS, step: 2, status: 'completed' })
+
+  await $.prompt.submit({ text: 'carry on' })
+  expect(seen[0]).toEqual([
+    [
+      'Progress panel: the step list from the last request still has open steps:',
+      '1. [pending] Check the balance',
+      '3. [pending] Send the form',
+      REMINDER_FOOTER,
+    ].join('\n'),
+  ])
+
+  await $.prompt.submit({ text: '/progress hide' })
+  expect(seen[1]).toBeUndefined()
+
+  await $.tool.call({ tool: STEPS, step: 1, status: 'completed' })
+  await $.tool.call({ tool: STEPS, step: 3, status: 'completed' })
+  await $.prompt.submit({ text: 'something new' })
+  expect(seen[2]).toBeUndefined()
+})
+
+test('a submit with no plan carries no reminder', async ($, on) => {
+  const seen: (readonly string[] | undefined)[] = []
+  on('prompt.submit', (_$, e) => {
+    seen.push(e.context)
+    return { text: e.text, context: e.context }
+  })
+  await $.prompt.submit({ text: 'hello' })
+  expect(seen).toEqual([undefined])
+})
+
+test('only the person\'s own prompts carry the reminder', async ($, on) => {
+  const seen: (readonly string[] | undefined)[] = []
+  on('prompt.submit', (_$, e) => {
+    seen.push(e.context)
+    return { text: e.text, context: e.context }
+  })
+  await $.tool.call({ tool: STEPS, plan: [{ title: 'Check the balance' }] })
+  await $.prompt.submit({ text: 'hand-back', origin: { kind: 'peer' } } as Parameters<typeof $.prompt.submit>[0])
+  await $.prompt.submit({ text: 'carry on', origin: { kind: 'composer' } } as Parameters<typeof $.prompt.submit>[0])
+  expect(seen[0]).toBeUndefined()
+  expect(seen[1]?.[0]).toContain('1. [pending] Check the balance')
+})
+
+test('a prompt submitted into a running turn carries no reminder', async ($, on) => {
+  const seen: (readonly string[] | undefined)[] = []
+  on('prompt.submit', (_$, e) => {
+    seen.push(e.context)
+    return { text: e.text, context: e.context }
+  })
+  await $.tool.call({ tool: STEPS, plan: [{ title: 'Check the balance' }] })
+  await $.prompt.submit({ text: 'also this', turnId: 't1' } as Parameters<typeof $.prompt.submit>[0])
+  expect(seen).toEqual([undefined])
+})
+
+test('the nudge asks for finished steps before the final answer', async ($, on) => {
+  on('prompt.compose', () => ({ sections: [] }))
+  const out = await $.prompt.compose({ model: 'claude-opus-5-5', promptModel: 'claude-opus-5-5', surfaces: ['terminal'], tools: [STEPS], outputStyle: null, traits: [] })
+  const nudge = out.sections.find(s => s.id === 'progress-band:tasks')
+  expect(nudge?.text).toContain('Before your final answer')
 })
 
 test('agent type and model fit their column at 100 columns', async ($, on) => {

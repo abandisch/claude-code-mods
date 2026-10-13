@@ -67,6 +67,7 @@ The person sees a live progress panel instead of tool output. It is built from t
 - Before starting, call it with \`plan\`: one entry per step, in order. Titles are short, plain, user-facing phrases ("Check the credit balance"), not implementation detail; activeForm is the present-continuous form ("Checking the credit balance").
 - Right before you start a step call it with \`step\` (its 1-based number) and \`status: "in_progress"\`; right after, \`status: "completed"\`. One step in progress at a time, in order.
 - Use \`add\` when the plan grows. Never leave a finished step in_progress.
+- Before your final answer, mark every finished step completed. A step the person does themselves counts as finished once they report it.
 A one-step request needs no step list. If TaskCreate/TaskUpdate are offered you may use those instead; the panel reads both.`
 
 const STEPS_SCHEMA = {
@@ -247,6 +248,18 @@ const endsInQuestion = (text: string): boolean => {
 const isStepStatus = (value: unknown): value is Step['status'] =>
   value === 'pending' || value === 'in_progress' || value === 'completed'
 
+const stepLine = (s: Step, i: number): string => `${i + 1}. [${s.status}] ${s.title}`
+
+const PERSON_ORIGINS: ReadonlySet<string> = new Set(['composer', 'bridge', 'sdk', 'unclassified'])
+
+const openStepsReminder = (list: Step[]): string =>
+  [
+    'Progress panel: the step list from the last request still has open steps:',
+    // Numbered over the full list, so each number stays a valid `step`.
+    ...list.flatMap((s, i) => (s.status === 'completed' ? [] : [stepLine(s, i)])),
+    `If this request continues that work, mark each step completed with the ${STEPS_TOOL} tool as it finishes, and before your final answer mark every finished step completed; leave a step that is genuinely unfinished open and say so. If this is a new request, call it with plan to replace the list (an empty plan clears it).`,
+  ].join('\n')
+
 const stateOfReason = (reason: string): AgentState =>
   reason === 'answer' ? 'completed' : reason === 'aborted' ? 'killed' : 'failed'
 
@@ -344,7 +357,7 @@ export const register: Register = on => {
     return {
       result: [
         'Steps:',
-        ...list.map((s, i) => `${i + 1}. [${s.status}] ${s.title}`),
+        ...list.map(stepLine),
         ...(isCapped ? [`The panel keeps at most ${MAX_STEPS} steps; the rest were not added.`] : []),
       ].join('\n'),
     }
@@ -415,6 +428,15 @@ export const register: Register = on => {
       ],
     }
   })
+
+  // Remind the model of open steps, so the list stops drifting across requests.
+  on('prompt.submit', async ($, e, next) => {
+    if (e.turnId !== undefined || e.text.trimStart().startsWith('/')) return next(e)
+    if (e.origin !== undefined && !PERSON_ORIGINS.has(e.origin.kind)) return next(e)
+    const list = await read($, steps)
+    if (list.every(s => s.status === 'completed')) return next(e)
+    return next({ ...e, context: [...(e.context ?? []), openStepsReminder(list)] })
+  }).catch(($, e, next) => next(e))
 
   on('turn.start', async ($, e, next) => {
     try {
@@ -717,8 +739,9 @@ export const register: Register = on => {
       .filter(Boolean)
       .join(' · ')
     let badge: string
-    let badgeColor: string
+    let badgeColor: string | undefined
     let message: string
+    let isEnded = false
     if (t?.isAsking) {
       badge = '‖ Needs you'
       badgeColor = 'warning'
@@ -746,9 +769,9 @@ export const register: Register = on => {
       badgeColor = 'warning'
       message = 'Claude asked you something'
     } else if (hasSteps && left > 0) {
-      badge = '‖ Needs you'
-      badgeColor = 'warning'
-      message = `Stopped with ${left} step${left === 1 ? '' : 's'} left; reply to continue`
+      badge = '◼ Ended'
+      isEnded = true
+      message = `Turn ended; ${left} step${left === 1 ? '' : 's'} not marked done`
     } else {
       badge = hasSteps ? '✔ All done' : '✔ Done'
       badgeColor = 'success'
@@ -761,7 +784,7 @@ export const register: Register = on => {
       return (
         <Box flexDirection="column" borderStyle="round" borderDimColor paddingX={1}>
           <Box flexDirection="row" gap={1}>
-            <Text color={badgeColor} inverse bold>
+            <Text color={badgeColor} inverse={!isEnded} dimColor={isEnded} bold>
               {` ${badge} `}
             </Text>
             <Text bold wrap="truncate-end">
@@ -824,22 +847,27 @@ export const register: Register = on => {
       }
     }
 
-    const wordWidth = 8
+    // fits 'Not marked'
+    const wordWidth = 10
     const barWidth = Math.max(6, Math.min(20, Math.floor(width / 4)))
-    const titleWidth = Math.max(8, width - 2 - barWidth - wordWidth - 6)
+    const titleWidth = Math.max(7, width - 2 - barWidth - wordWidth - 6)
 
     const firstPending = list.findIndex(x => x.status === 'pending')
     const stepRow = (s: Step, index: number) => {
       const isDone = s.status === 'completed'
-      const isNow = s.status === 'in_progress'
-      const mark = isDone ? '✔' : isNow ? '‖' : '○'
+      const isActive = s.status === 'in_progress'
+      const mark = isDone ? '✔' : isActive ? '‖' : '○'
+      const isNow = isActive && !isEnded
+      const isUnmarked = isEnded && !isDone
       const word = isDone
         ? 'Done'
-        : isNow
-          ? 'Working'
-          : index === firstPending
-            ? 'Next'
-            : 'Up next'
+        : isUnmarked
+          ? 'Not marked'
+          : isNow
+            ? 'Working'
+            : index === firstPending
+              ? 'Next'
+              : 'Up next'
       const fill = isDone ? 1 : isNow ? 0.5 : 0
       const color = isDone ? 'success' : isNow ? 'claude' : 'subtle'
 
@@ -853,12 +881,12 @@ export const register: Register = on => {
               {clip(s.title, titleWidth)}
             </Text>
           </Box>
-          <Box width={barWidth}>
+          <Box width={barWidth} flexShrink={0}>
             <Text color={color} dimColor={!isDone && !isNow}>
               {bar(fill, barWidth)}
             </Text>
           </Box>
-          <Box width={wordWidth}>
+          <Box width={wordWidth} flexShrink={0}>
             <Text color={color} dimColor={!isNow && !isDone}>
               {word}
             </Text>
@@ -880,7 +908,7 @@ export const register: Register = on => {
     return (
       <Box flexDirection="column" borderStyle="round" borderDimColor paddingX={1}>
         <Box flexDirection="row" gap={1}>
-          <Text color={badgeColor} inverse bold>
+          <Text color={badgeColor} inverse={!isEnded} dimColor={isEnded} bold>
             {` ${badge} `}
           </Text>
           <Text bold wrap="truncate-end">
@@ -892,7 +920,7 @@ export const register: Register = on => {
         {hasSteps && (
           <Box flexDirection="row" gap={1}>
             <Text dimColor wrap="truncate-end">
-              {working ? `Step ${list.indexOf(working) + 1} of ${total}` : `${done} of ${total} steps`}
+              {working && !isEnded ? `Step ${list.indexOf(working) + 1} of ${total}` : `${done} of ${total} steps`}
             </Text>
             <Text color={done === total ? 'success' : 'claude'}>{bar(ratio, Math.max(6, width - 18 - 6 - 6))}</Text>
             <Text color={done === total ? 'success' : 'claude'} bold>

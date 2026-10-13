@@ -5,8 +5,8 @@ panel above the prompt.
 
 ## What it shows
 
-- **Header**: a state badge (`▶ Working`, `‖ Needs you`, `✔ All done`,
-  `⊘ Stopped`, `✗ Failed`), the step Claude is on, and the clock. While
+- **Header**: a state badge (`▶ Working`, `‖ Needs you`, `◼ Ended`,
+  `✔ All done`, `⊘ Stopped`, `✗ Failed`), the step Claude is on, and the clock. While
   agents from this turn run it counts them by role instead
   (`Scouting: 2 of 5 scouts done`). A background agent still running after
   the turn ends keeps the band working and the clock counting;
@@ -15,7 +15,8 @@ panel above the prompt.
   finished.
 - **Steps**: Claude's step list (the mod's `steps` tool, or TaskCreate /
   TaskUpdate / TodoWrite) as rows
-  with a bar and a word: `Done`, `Working`, `Next`, `Up next`. When the band
+  with a bar and a word: `Done`, `Working`, `Next`, `Up next`; in the Ended
+  state (below) every open row reads `Not marked` instead. When the band
   runs out of rows, finished steps fold into one line and the window keeps
   the step in progress in view (`+N more steps` marks steps cut at the tail).
   While Claude works, a dim `↳ Tool: label` line under the active step names
@@ -33,11 +34,14 @@ panel above the prompt.
   type/model and calls columns drop; under 50, the time too; the role prefix
   drops when the description gets narrow. The section header adds the
   roster's token total.
-- **Needs you** in two cases: Claude's answer asks you something (its last
+- **Needs you** when Claude's answer asks you something (its last
   line, ignoring a final `🔊` speech line, ends in `?`, or, failing that, a
   small classifier call on the answer's tail says it is a question; a
-  classifier answer that arrives after the next turn started is dropped), or
-  the turn ended with steps still open (`Stopped with N steps left`).
+  classifier answer that arrives after the next turn started is dropped).
+- **Ended**: the turn finished on a plain answer with steps still open; the
+  header reads `Turn ended; N steps not marked done`, the open rows read
+  `Not marked`, and the progress line shows done-of-total. Nothing is
+  auto-completed: the panel only shows what the model recorded.
 - **Collapse**: 20 s after the turn and its agents finish, the band shrinks
   to one row (badge, summary, clock) with a `Show` button that expands it.
   To press it, focus the band (ctrl+x then tab, or click it) and press `s`
@@ -62,7 +66,10 @@ The mod registers its own tool, `mcp__progress-band__steps`, which Claude
 calls to plan the steps of a multi-step request and mark each one
 in_progress and completed. It answers with the list as plain text
 (`Steps:` then `1. [in_progress] Check the balance`, one per line). A short
-system-prompt section asks Claude to use it. The panel also reads
+system-prompt section asks Claude to use it. Each new prompt the person
+sends while steps are open (not a slash command, a message delivered into a
+running turn, or an agent or task notification) carries a hidden reminder
+listing them, so the model closes or replaces the list. The panel also reads
 TaskCreate / TaskUpdate / TodoWrite when a session offers those tools.
 
 Running the `orchestrate` skill seeds a nine-step wave (Scout the code and
